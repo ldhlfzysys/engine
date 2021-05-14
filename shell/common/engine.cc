@@ -4,6 +4,7 @@
 
 #include "flutter/shell/common/engine.h"
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -35,6 +36,12 @@ static constexpr char kLocalizationChannel[] = "flutter/localization";
 static constexpr char kSettingsChannel[] = "flutter/settings";
 static constexpr char kIsolateChannel[] = "flutter/isolate";
 
+namespace {
+fml::MallocMapping MakeMapping(const std::string& str) {
+  return fml::MallocMapping::Copy(str.c_str(), str.length());
+}
+}  // namespace
+
 Engine::Engine(
     Delegate& delegate,
     const PointerDataDispatcherMaker& dispatcher_maker,
@@ -63,7 +70,7 @@ Engine::Engine(Delegate& delegate,
                DartVM& vm,
                fml::RefPtr<const DartSnapshot> isolate_snapshot,
                TaskRunners task_runners,
-               const PlatformData platform_data,
+               const PlatformData& platform_data,
                Settings settings,
                std::unique_ptr<Animator> animator,
                fml::WeakPtr<IOManager> io_manager,
@@ -203,13 +210,10 @@ Engine::RunStatus Engine::Run(RunConfiguration configuration) {
 
   auto service_id = runtime_controller_->GetRootIsolateServiceID();
   if (service_id.has_value()) {
-    fml::RefPtr<PlatformMessage> service_id_message =
-        fml::MakeRefCounted<flutter::PlatformMessage>(
-            kIsolateChannel,
-            std::vector<uint8_t>(service_id.value().begin(),
-                                 service_id.value().end()),
-            nullptr);
-    HandlePlatformMessage(service_id_message);
+    std::unique_ptr<PlatformMessage> service_id_message =
+        std::make_unique<flutter::PlatformMessage>(
+            kIsolateChannel, MakeMapping(service_id.value()), nullptr);
+    HandlePlatformMessage(std::move(service_id_message));
   }
 
   return Engine::RunStatus::Success;
@@ -226,15 +230,26 @@ void Engine::ReportTimings(std::vector<int64_t> timings) {
 }
 
 void Engine::HintFreed(size_t size) {
-  hint_freed_bytes_since_last_idle_ += size;
+  hint_freed_bytes_since_last_call_ += size;
 }
 
 void Engine::NotifyIdle(int64_t deadline) {
   auto trace_event = std::to_string(deadline - Dart_TimelineGetMicros());
   TRACE_EVENT1("flutter", "Engine::NotifyIdle", "deadline_now_delta",
                trace_event.c_str());
-  runtime_controller_->NotifyIdle(deadline, hint_freed_bytes_since_last_idle_);
-  hint_freed_bytes_since_last_idle_ = 0;
+  // Avoid asking the RuntimeController to call Dart_HintFreed more than once
+  // every 5 seconds.
+  // This is to avoid GCs happening too frequently e.g. when an animated GIF is
+  // playing and disposing of an image every frame.
+  fml::TimePoint now = delegate_.GetCurrentTimePoint();
+  fml::TimeDelta delta = now - last_hint_freed_call_time_;
+  size_t hint_freed_bytes = 0;
+  if (delta.ToMilliseconds() > 5000 && hint_freed_bytes_since_last_call_ > 0) {
+    hint_freed_bytes = hint_freed_bytes_since_last_call_;
+    hint_freed_bytes_since_last_call_ = 0;
+    last_hint_freed_call_time_ = now;
+  }
+  runtime_controller_->NotifyIdle(deadline, hint_freed_bytes);
 }
 
 std::optional<uint32_t> Engine::GetUIIsolateReturnCode() {
@@ -285,7 +300,7 @@ void Engine::SetViewportMetrics(const ViewportMetrics& metrics) {
   }
 }
 
-void Engine::DispatchPlatformMessage(fml::RefPtr<PlatformMessage> message) {
+void Engine::DispatchPlatformMessage(std::unique_ptr<PlatformMessage> message) {
   std::string channel = message->channel();
   if (channel == kLifecycleChannel) {
     if (HandleLifecyclePlatformMessage(message.get())) {
@@ -315,7 +330,8 @@ void Engine::DispatchPlatformMessage(fml::RefPtr<PlatformMessage> message) {
 
 bool Engine::HandleLifecyclePlatformMessage(PlatformMessage* message) {
   const auto& data = message->data();
-  std::string state(reinterpret_cast<const char*>(data.data()), data.size());
+  std::string state(reinterpret_cast<const char*>(data.GetMapping()),
+                    data.GetSize());
   if (state == "AppLifecycleState.paused" ||
       state == "AppLifecycleState.detached") {
     activity_running_ = false;
@@ -338,11 +354,12 @@ bool Engine::HandleLifecyclePlatformMessage(PlatformMessage* message) {
 }
 
 bool Engine::HandleNavigationPlatformMessage(
-    fml::RefPtr<PlatformMessage> message) {
+    std::unique_ptr<PlatformMessage> message) {
   const auto& data = message->data();
 
   rapidjson::Document document;
-  document.Parse(reinterpret_cast<const char*>(data.data()), data.size());
+  document.Parse(reinterpret_cast<const char*>(data.GetMapping()),
+                 data.GetSize());
   if (document.HasParseError() || !document.IsObject()) {
     return false;
   }
@@ -360,7 +377,8 @@ bool Engine::HandleLocalizationPlatformMessage(PlatformMessage* message) {
   const auto& data = message->data();
 
   rapidjson::Document document;
-  document.Parse(reinterpret_cast<const char*>(data.data()), data.size());
+  document.Parse(reinterpret_cast<const char*>(data.GetMapping()),
+                 data.GetSize());
   if (document.HasParseError() || !document.IsObject()) {
     return false;
   }
@@ -400,7 +418,8 @@ bool Engine::HandleLocalizationPlatformMessage(PlatformMessage* message) {
 
 void Engine::HandleSettingsPlatformMessage(PlatformMessage* message) {
   const auto& data = message->data();
-  std::string jsonData(reinterpret_cast<const char*>(data.data()), data.size());
+  std::string jsonData(reinterpret_cast<const char*>(data.GetMapping()),
+                       data.GetSize());
   if (runtime_controller_->SetUserSettingsData(std::move(jsonData)) &&
       have_surface_) {
     ScheduleFrame();
@@ -425,7 +444,7 @@ void Engine::DispatchKeyDataPacket(std::unique_ptr<KeyDataPacket> packet,
 
 void Engine::DispatchSemanticsAction(int id,
                                      SemanticsAction action,
-                                     std::vector<uint8_t> args) {
+                                     fml::MallocMapping args) {
   runtime_controller_->DispatchSemanticsAction(id, action, std::move(args));
 }
 
@@ -477,7 +496,7 @@ void Engine::UpdateSemantics(SemanticsNodeUpdates update,
   delegate_.OnEngineUpdateSemantics(std::move(update), std::move(actions));
 }
 
-void Engine::HandlePlatformMessage(fml::RefPtr<PlatformMessage> message) {
+void Engine::HandlePlatformMessage(std::unique_ptr<PlatformMessage> message) {
   if (message->channel() == kAssetChannel) {
     HandleAssetPlatformMessage(std::move(message));
   } else {
@@ -515,18 +534,20 @@ void Engine::DoDispatchPacket(std::unique_ptr<PointerDataPacket> packet,
   }
 }
 
-void Engine::ScheduleSecondaryVsyncCallback(const fml::closure& callback) {
-  animator_->ScheduleSecondaryVsyncCallback(callback);
+void Engine::ScheduleSecondaryVsyncCallback(uintptr_t id,
+                                            const fml::closure& callback) {
+  animator_->ScheduleSecondaryVsyncCallback(id, callback);
 }
 
-void Engine::HandleAssetPlatformMessage(fml::RefPtr<PlatformMessage> message) {
+void Engine::HandleAssetPlatformMessage(
+    std::unique_ptr<PlatformMessage> message) {
   fml::RefPtr<PlatformMessageResponse> response = message->response();
   if (!response) {
     return;
   }
   const auto& data = message->data();
-  std::string asset_name(reinterpret_cast<const char*>(data.data()),
-                         data.size());
+  std::string asset_name(reinterpret_cast<const char*>(data.GetMapping()),
+                         data.GetSize());
 
   if (asset_manager_) {
     std::unique_ptr<fml::Mapping> asset_mapping =

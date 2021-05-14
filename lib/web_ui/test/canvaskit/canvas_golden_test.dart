@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.12
 import 'dart:html' as html;
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -34,6 +33,16 @@ Future<void> matchPictureGolden(String goldenFile, CkPicture picture, { ui.Rect 
 void testMain() {
   group('CkCanvas', () {
     setUpCanvasKitTest();
+
+    setUp(() {
+      expect(notoDownloadQueue.downloader.debugActiveDownloadCount, 0);
+      expect(notoDownloadQueue.isPending, false);
+    });
+
+    tearDown(() {
+      expect(notoDownloadQueue.downloader.debugActiveDownloadCount, 0);
+      expect(notoDownloadQueue.isPending, false);
+    });
 
     test('renders using non-recording canvas if weak refs are supported',
         () async {
@@ -197,7 +206,7 @@ void testMain() {
 
       // Render the scene once without painting the shadow bounds just to
       // preroll the scene to compute the shadow bounds.
-      buildTestScene(paintShadowBounds: false).rootLayer!.preroll(
+      buildTestScene(paintShadowBounds: false).rootLayer.preroll(
         PrerollContext(
           RasterCache(),
           HtmlViewEmbedder(),
@@ -249,14 +258,10 @@ void testMain() {
       await testTextStyle('paragraph font size', paragraphFontSize: 22);
     });
 
-    // TODO(yjbanov): paragraphHeight seems to have no effect, but maybe I'm using it wrong.
-    //                https://github.com/flutter/flutter/issues/74337
     test('text styles - paragraph height', () async {
       await testTextStyle('paragraph height', layoutWidth: 50, paragraphHeight: 1.5);
     });
 
-    // TODO(yjbanov): paragraphTextHeightBehavior seems to have no effect. Unsure how to use it.
-    //                https://github.com/flutter/flutter/issues/74337
     test('text styles - paragraph text height behavior', () async {
       await testTextStyle('paragraph text height behavior', layoutWidth: 50, paragraphHeight: 1.5, paragraphTextHeightBehavior: ui.TextHeightBehavior(
         applyHeightToFirstAscent: false,
@@ -264,14 +269,10 @@ void testMain() {
       ));
     });
 
-    // TODO(yjbanov): paragraph fontWeight doesn't seem to work.
-    //                https://github.com/flutter/flutter/issues/74338
     test('text styles - paragraph weight', () async {
       await testTextStyle('paragraph weight', paragraphFontWeight: ui.FontWeight.w900);
     });
 
-    // TODO(yjbanov): paragraph fontStyle doesn't seem to work.
-    //                https://github.com/flutter/flutter/issues/74338
     test('text style - paragraph font style', () async {
       await testTextStyle(
         'paragraph font style',
@@ -356,6 +357,27 @@ void testMain() {
       await testTextStyle('height', height: 2);
     });
 
+    test('text styles - leading distribution', () async {
+      await testTextStyle('half leading', height: 20, fontSize: 10, leadingDistribution: ui.TextLeadingDistribution.even);
+      await testTextStyle(
+        'half leading inherited from paragraph',
+        height: 20,
+        fontSize: 10,
+        paragraphTextHeightBehavior: ui.TextHeightBehavior(
+          leadingDistribution: ui.TextLeadingDistribution.even,
+        ),
+      );
+      await testTextStyle(
+        'text style half leading overrides paragraph style half leading',
+        height: 20,
+        fontSize: 10,
+        leadingDistribution: ui.TextLeadingDistribution.proportional,
+        paragraphTextHeightBehavior: ui.TextHeightBehavior(
+          leadingDistribution: ui.TextLeadingDistribution.even,
+        ),
+      );
+    });
+
     // TODO(yjbanov): locales specified in text styles don't work:
     //                https://github.com/flutter/flutter/issues/74687
     // TODO(yjbanov): spaces are not rendered correctly:
@@ -416,9 +438,6 @@ void testMain() {
     });
 
     test('text styles - old style figures', () async {
-      // TODO(yjbanov): we should not need to reset the fallbacks, see
-      //                https://github.com/flutter/flutter/issues/74741
-      skiaFontCollection.debugResetFallbackFonts();
       await testTextStyle(
         'old style figures',
         paragraphFontFamily: 'Roboto',
@@ -430,9 +449,6 @@ void testMain() {
     });
 
     test('text styles - stylistic set 1', () async {
-      // TODO(yjbanov): we should not need to reset the fallbacks, see
-      //                https://github.com/flutter/flutter/issues/74741
-      skiaFontCollection.debugResetFallbackFonts();
       await testTextStyle(
         'stylistic set 1',
         paragraphFontFamily: 'Roboto',
@@ -444,9 +460,6 @@ void testMain() {
     });
 
     test('text styles - stylistic set 2', () async {
-      // TODO(yjbanov): we should not need to reset the fallbacks, see
-      //                https://github.com/flutter/flutter/issues/74741
-      skiaFontCollection.debugResetFallbackFonts();
       await testTextStyle(
         'stylistic set 2',
         paragraphFontFamily: 'Roboto',
@@ -473,8 +486,6 @@ void testMain() {
       );
     });
 
-    // TODO(yjbanov): paragraph fontWeight doesn't seem to work.
-    //                https://github.com/flutter/flutter/issues/74338
     test('text style - override font weight', () async {
       await testTextStyle(
         'override font weight',
@@ -483,13 +494,34 @@ void testMain() {
       );
     });
 
-    // TODO(yjbanov): paragraph fontStyle doesn't seem to work.
-    //                https://github.com/flutter/flutter/issues/74338
     test('text style - override font style', () async {
       await testTextStyle(
         'override font style',
         paragraphFontStyle: ui.FontStyle.italic,
         fontStyle: ui.FontStyle.normal,
+      );
+    });
+
+    test('text style - characters from multiple fallback fonts', () async {
+      await testTextStyle(
+        'multi-font characters',
+        // This character is claimed by multiple fonts. This test makes sure
+        // we can find a font supporting it.
+        outerText: '欢',
+        innerText: '',
+      );
+    });
+
+    test('text style - symbols', () async {
+      // One of the CJK fonts loaded in one of the tests above also contains
+      // some of these symbols. To make sure the test produces predictable
+      // results we reset the fallback data forcing the engine to reload
+      // fallbacks, which for this test will only load Noto Symbols.
+      FontFallbackData.debugReset();
+      await testTextStyle(
+        'symbols',
+        outerText: '← ↑ → ↓ ',
+        innerText: '',
       );
     });
 
@@ -580,9 +612,144 @@ void testMain() {
         region: ui.Rect.fromLTRB(0, 0, testWidth, 850),
       );
     });
+
+    test('sample Chinese text', () async {
+      await testSampleText(
+        'chinese',
+        '也称乱数假文或者哑元文本， '
+        '是印刷及排版领域所常用的虚拟文字。'
+        '由于曾经一台匿名的打印机刻意打乱了'
+        '一盒印刷字体从而造出一本字体样品书',
+      );
+    });
+
+    test('sample Armenian text', () async {
+      await testSampleText(
+        'armenian',
+        'տպագրության և տպագրական արդյունաբերության համար նախատեսված մոդելային տեքստ է',
+      );
+    });
+
+    test('sample Albanian text', () async {
+      await testSampleText(
+        'albanian',
+        'është një tekst shabllon i industrisë së printimit dhe shtypshkronjave Lorem Ipsum ka qenë teksti shabllon',
+      );
+    });
+
+    test('sample Arabic text', () async {
+      await testSampleText(
+        'arabic',
+        'هناك حقيقة مثبتة منذ زمن طويل وهي أن المحتوى المقروء لصفحة ما سيلهي',
+        textDirection: ui.TextDirection.rtl,
+      );
+    });
+
+    test('sample Bulgarian text', () async {
+      await testSampleText(
+        'bulgarian',
+        'е елементарен примерен текст използван в печатарската и типографската индустрия',
+      );
+    });
+
+    test('sample Catalan text', () async {
+      await testSampleText(
+        'catalan',
+        'és un text de farciment usat per la indústria de la tipografia i la impremta',
+      );
+    });
+
+    test('sample English text', () async {
+      await testSampleText(
+        'english',
+        'Lorem Ipsum is simply dummy text of the printing and typesetting industry',
+      );
+    });
+
+    test('sample Greek text', () async {
+      await testSampleText(
+        'greek',
+        'είναι απλά ένα κείμενο χωρίς νόημα για τους επαγγελματίες της τυπογραφίας και στοιχειοθεσίας',
+      );
+    });
+
+    test('sample Hebrew text', () async {
+      await testSampleText(
+        'hebrew',
+        'זוהי עובדה מבוססת שדעתו של הקורא תהיה מוסחת על ידי טקטס קריא כאשר הוא יביט בפריסתו',
+        textDirection: ui.TextDirection.rtl,
+      );
+    });
+
+    test('sample Hindi text', () async {
+      await testSampleText(
+        'hindi',
+        'छपाई और अक्षर योजन उद्योग का एक साधारण डमी पाठ है सन १५०० के बाद से अभी तक इस उद्योग का मानक डमी पाठ मन गया जब एक अज्ञात मुद्रक ने नमूना लेकर एक नमूना किताब बनाई',
+      );
+    });
+
+    test('sample Thai text', () async {
+      await testSampleText(
+        'thai',
+        'คือ เนื้อหาจำลองแบบเรียบๆ ที่ใช้กันในธุรกิจงานพิมพ์หรืองานเรียงพิมพ์ มันได้กลายมาเป็นเนื้อหาจำลองมาตรฐานของธุรกิจดังกล่าวมาตั้งแต่ศตวรรษที่',
+      );
+    });
+
+    test('sample Georgian text', () async {
+      await testSampleText(
+        'georgian',
+        'საბეჭდი და ტიპოგრაფიული ინდუსტრიის უშინაარსო ტექსტია. იგი სტანდარტად',
+      );
+    });
+
+    // We've seen text break when we load many fonts simultaneously. This test
+    // combines text in multiple languages into one long paragraph to make sure
+    // we can handle it.
+    test('sample multilingual text', () async {
+      await testSampleText(
+        'multilingual',
+        '也称乱数假文或者哑元文本， 是印刷及排版领域所常用的虚拟文字。 '
+        'տպագրության և տպագրական արդյունաբերության համար '
+        'është një tekst shabllon i industrisë së printimit '
+        ' زمن طويل وهي أن المحتوى المقروء لصفحة ما سيلهي '
+        'е елементарен примерен текст използван в печатарската '
+        'és un text de farciment usat per la indústria de la '
+        'Lorem Ipsum is simply dummy text of the printing '
+        'είναι απλά ένα κείμενο χωρίς νόημα για τους επαγγελματίες '
+        ' זוהי עובדה מבוססת שדעתו של הקורא תהיה מוסחת על ידי טקטס קריא '
+        'छपाई और अक्षर योजन उद्योग का एक साधारण डमी पाठ है सन '
+        'คือ เนื้อหาจำลองแบบเรียบๆ ที่ใช้กันในธุรกิจงานพิมพ์หรืองานเรียงพิมพ์ '
+        'საბეჭდი და ტიპოგრაფიული ინდუსტრიის უშინაარსო ტექსტია ',
+      );
+    });
     // TODO: https://github.com/flutter/flutter/issues/60040
     // TODO: https://github.com/flutter/flutter/issues/71520
   }, skip: isIosSafari || isFirefox);
+}
+
+Future<void> testSampleText(String language, String text, { ui.TextDirection textDirection = ui.TextDirection.ltr, bool write = false }) async {
+  FontFallbackData.debugReset();
+  const double testWidth = 300;
+  double paragraphHeight = 0;
+  final CkPicture picture = await generatePictureWhenFontsStable(() {
+    final CkPictureRecorder recorder = CkPictureRecorder();
+    final CkCanvas canvas = recorder.beginRecording(ui.Rect.largest);
+    final CkParagraphBuilder paragraphBuilder = CkParagraphBuilder(CkParagraphStyle(
+      textDirection: textDirection,
+    ));
+    paragraphBuilder.addText(text);
+    final CkParagraph paragraph = paragraphBuilder.build();
+    paragraph.layout(ui.ParagraphConstraints(width: testWidth - 20));
+    canvas.drawParagraph(paragraph, const ui.Offset(10, 10));
+    paragraphHeight = paragraph.height;
+    return recorder.endRecording();
+  });
+  await matchPictureGolden(
+    'canvaskit_sample_text_$language.png',
+    picture,
+    region: ui.Rect.fromLTRB(0, 0, testWidth, paragraphHeight + 20),
+    write: write,
+  );
 }
 
 typedef ParagraphFactory = CkParagraph Function();
@@ -972,6 +1139,7 @@ Future<void> testTextStyle(
   double? letterSpacing,
   double? wordSpacing,
   double? height,
+  ui.TextLeadingDistribution? leadingDistribution,
   ui.Locale? locale,
   CkPaint? background,
   CkPaint? foreground,
@@ -999,8 +1167,8 @@ Future<void> testTextStyle(
       fontSize: paragraphFontSize,
       height: paragraphHeight,
       textHeightBehavior: paragraphTextHeightBehavior,
-      fontWeight: ui.FontWeight.normal,
-      fontStyle: ui.FontStyle.normal,
+      fontWeight: paragraphFontWeight,
+      fontStyle: paragraphFontStyle,
       strutStyle: paragraphStrutStyle,
       ellipsis: paragraphEllipsis,
       locale: paragraphLocale,
@@ -1023,6 +1191,7 @@ Future<void> testTextStyle(
       letterSpacing: letterSpacing,
       wordSpacing: wordSpacing,
       height: height,
+      leadingDistribution: leadingDistribution,
       locale: locale,
       background: background,
       foreground: foreground,
@@ -1067,15 +1236,30 @@ Future<void> testTextStyle(
   }
 
   // Render once to trigger font downloads.
-  renderPicture();
-  // Wait for fonts to finish loading.
-  await notoDownloadQueue.downloader.debugWhenIdle();
-  // Render again for actual screenshotting.
-  final CkPicture picture = renderPicture();
+  CkPicture picture = await generatePictureWhenFontsStable(renderPicture);
   await matchPictureGolden(
     'canvaskit_text_styles_${name.replaceAll(' ', '_')}.png',
     picture,
     region: region,
     write: write,
   );
+  expect(notoDownloadQueue.debugIsLoadingFonts, isFalse);
+  expect(notoDownloadQueue.pendingSubsets, isEmpty);
+  expect(notoDownloadQueue.downloader.debugActiveDownloadCount, 0);
+}
+
+typedef PictureGenerator = CkPicture Function();
+
+Future<CkPicture> generatePictureWhenFontsStable(PictureGenerator generator) async {
+  CkPicture picture = generator();
+  // Font downloading begins asynchronously so we inject a timer before checking the download queue.
+  await Future<void>.delayed(Duration.zero);
+  while (notoDownloadQueue.isPending || notoDownloadQueue.downloader.debugActiveDownloadCount > 0) {
+    await notoDownloadQueue.debugWhenIdle();
+    await notoDownloadQueue.downloader.debugWhenIdle();
+    picture = generator();
+    // Dummy timer for the same reason as above.
+    await Future<void>.delayed(Duration.zero);
+  }
+  return picture;
 }

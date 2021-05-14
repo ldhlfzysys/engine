@@ -23,13 +23,48 @@ constexpr float kScenicZElevationBetweenLayers = 0.0001f;
 constexpr float kScenicZElevationForPlatformView = 100.f;
 constexpr float kScenicElevationForInputInterceptor = 500.f;
 
+SkScalar OpacityFromMutatorStack(const flutter::MutatorsStack& mutatorsStack) {
+  SkScalar mutatorsOpacity = 1.f;
+  for (auto i = mutatorsStack.Bottom(); i != mutatorsStack.Top(); ++i) {
+    const auto& mutator = *i;
+    switch (mutator->GetType()) {
+      case flutter::MutatorType::opacity: {
+        mutatorsOpacity *= std::clamp(mutator->GetAlphaFloat(), 0.f, 1.f);
+      } break;
+      default: {
+        break;
+      }
+    }
+  }
+
+  return mutatorsOpacity;
+}
+
+SkMatrix TransformFromMutatorStack(
+    const flutter::MutatorsStack& mutatorsStack) {
+  SkMatrix mutatorsTransform;
+  for (auto i = mutatorsStack.Bottom(); i != mutatorsStack.Top(); ++i) {
+    const auto& mutator = *i;
+    switch (mutator->GetType()) {
+      case flutter::MutatorType::transform: {
+        mutatorsTransform.preConcat(mutator->GetMatrix());
+      } break;
+      default: {
+        break;
+      }
+    }
+  }
+
+  return mutatorsTransform;
+}
+
 }  // namespace
 
 FuchsiaExternalViewEmbedder::FuchsiaExternalViewEmbedder(
     std::string debug_label,
     fuchsia::ui::views::ViewToken view_token,
     scenic::ViewRefPair view_ref_pair,
-    SessionConnection& session,
+    DefaultSessionConnection& session,
     VulkanSurfaceProducer& surface_producer,
     bool intercept_all_input)
     : session_(session),
@@ -165,7 +200,7 @@ void FuchsiaExternalViewEmbedder::EndFrame(
 void FuchsiaExternalViewEmbedder::SubmitFrame(
     GrDirectContext* context,
     std::unique_ptr<flutter::SurfaceFrame> frame,
-    const std::shared_ptr<fml::SyncSwitch>& gpu_disable_sync_switch) {
+    const std::shared_ptr<const fml::SyncSwitch>& gpu_disable_sync_switch) {
   TRACE_EVENT0("flutter", "FuchsiaExternalViewEmbedder::SubmitFrame");
   std::vector<std::unique_ptr<SurfaceProducerSurface>> frame_surfaces;
   std::unordered_map<EmbedderLayerId, size_t> frame_surface_indices;
@@ -214,32 +249,28 @@ void FuchsiaExternalViewEmbedder::SubmitFrame(
         FML_DCHECK(layer->second.embedded_view_params.has_value());
         auto& view_params = layer->second.embedded_view_params.value();
 
-        // Compute offset and size for the platform view.
-        SkPoint view_offset =
-            SkPoint::Make(view_params.finalBoundingRect().left(),
-                          view_params.finalBoundingRect().top());
-        SkSize view_size =
-            SkSize::Make(view_params.finalBoundingRect().width(),
-                         view_params.finalBoundingRect().height());
+        // Validate the MutatorsStack encodes the same transform as the
+        // transform matrix.
+        FML_DCHECK(TransformFromMutatorStack(view_params.mutatorsStack()) ==
+                   view_params.transformMatrix());
 
-        // Compute opacity for the platform view.
-        float view_opacity = 1.0f;
-        for (auto i = view_params.mutatorsStack().Bottom();
-             i != view_params.mutatorsStack().Top(); ++i) {
-          const auto& mutator = *i;
-          switch (mutator->GetType()) {
-            case flutter::MutatorType::opacity: {
-              view_opacity *= std::clamp(mutator->GetAlphaFloat(), 0.0f, 1.0f);
-            } break;
-            default: {
-              break;
-            }
-          }
-        }
-
+        // Get the ScenicView structure corresponding to the platform view.
         auto found = scenic_views_.find(layer_id.value());
         FML_DCHECK(found != scenic_views_.end());
         auto& view_holder = found->second;
+
+        // Compute offset and size for the platform view.
+        const SkMatrix& view_transform = view_params.transformMatrix();
+        const SkPoint view_offset = SkPoint::Make(
+            view_transform.getTranslateX(), view_transform.getTranslateY());
+        const SkSize view_size = view_params.sizePoints();
+        const SkSize view_scale = SkSize::Make(view_transform.getScaleX(),
+                                               view_transform.getScaleY());
+        FML_DCHECK(!view_size.isEmpty() && !view_scale.isEmpty());
+
+        // Compute opacity for the platform view.
+        const float view_opacity =
+            OpacityFromMutatorStack(view_params.mutatorsStack());
 
         // Set opacity.
         if (view_opacity != view_holder.opacity) {
@@ -247,14 +278,19 @@ void FuchsiaExternalViewEmbedder::SubmitFrame(
           view_holder.opacity = view_opacity;
         }
 
-        // Set offset and elevation.
+        // Set transform and elevation.
         const float view_elevation =
             kScenicZElevationBetweenLayers * scenic_layer_index +
             embedded_views_height;
         if (view_offset != view_holder.offset ||
+            view_scale != view_holder.scale ||
             view_elevation != view_holder.elevation) {
           view_holder.entity_node.SetTranslation(view_offset.fX, view_offset.fY,
                                                  -view_elevation);
+          view_holder.entity_node.SetScale(view_scale.fWidth,
+                                           view_scale.fHeight, 1.f);
+          view_holder.offset = view_offset;
+          view_holder.scale = view_scale;
           view_holder.elevation = view_elevation;
         }
 
@@ -267,26 +303,32 @@ void FuchsiaExternalViewEmbedder::SubmitFrame(
           view_holder.hit_testable = view_holder.pending_hit_testable;
         }
 
-        // Set size and focusable.
+        // Set size, occlusion hint, and focusable.
         //
         // Scenic rejects `SetViewProperties` calls with a zero size.
         if (!view_size.isEmpty() &&
             (view_size != view_holder.size ||
+             view_holder.pending_occlusion_hint != view_holder.occlusion_hint ||
              view_holder.pending_focusable != view_holder.focusable)) {
+          view_holder.size = view_size;
+          view_holder.occlusion_hint = view_holder.pending_occlusion_hint;
+          view_holder.focusable = view_holder.pending_focusable;
           view_holder.view_holder.SetViewProperties({
               .bounding_box =
                   {
                       .min = {.x = 0.f, .y = 0.f, .z = -1000.f},
-                      .max = {.x = view_size.width(),
-                              .y = view_size.height(),
+                      .max = {.x = view_holder.size.fWidth,
+                              .y = view_holder.size.fHeight,
                               .z = 0.f},
                   },
-              .inset_from_min = {.x = 0.f, .y = 0.f, .z = 0.f},
-              .inset_from_max = {.x = 0.f, .y = 0.f, .z = 0.f},
-              .focus_change = view_holder.pending_focusable,
+              .inset_from_min = {.x = view_holder.occlusion_hint.fLeft,
+                                 .y = view_holder.occlusion_hint.fTop,
+                                 .z = 0.f},
+              .inset_from_max = {.x = view_holder.occlusion_hint.fRight,
+                                 .y = view_holder.occlusion_hint.fBottom,
+                                 .z = 0.f},
+              .focus_change = view_holder.focusable,
           });
-          view_holder.size = view_size;
-          view_holder.focusable = view_holder.pending_focusable;
         }
 
         // Attach the ScenicView to the main scene graph.
@@ -346,41 +388,44 @@ void FuchsiaExternalViewEmbedder::SubmitFrame(
         // Scenic currently lacks an API to enable rendering of alpha channel;
         // Flutter Embedder also lacks an API to detect if a layer has alpha or
         // not. Alpha channels are only rendered if there is a OpacityNode
-        // higher in the tree with opacity != 1. For now, always assume t he
-        // layer has alpha and clamp to a infinitesimally smaller value than 1.
+        // higher in the tree with opacity != 1. For now, assume any layer
+        // beyond the first has alpha and clamp to a infinitesimally smaller
+        // value than 1.  The first layer retains an opacity of 1 to avoid
+        // blending with anything underneath.
         //
         // This does not cause visual problems in practice, but probably has
         // performance implications.
-        auto& scenic_layer = scenic_layers_[scenic_layer_index];
-        auto& scenic_rect = found_rects->second[rect_index];
+        const SkAlpha layer_opacity =
+            first_layer ? SK_AlphaOPAQUE : SK_AlphaOPAQUE - 1;
         const float layer_elevation =
             kScenicZElevationBetweenLayers * scenic_layer_index +
             embedded_views_height;
+        auto& scenic_layer = scenic_layers_[scenic_layer_index];
+        auto& scenic_rect = found_rects->second[rect_index];
         scenic_layer.shape_node.SetLabel("Flutter::Layer");
         scenic_layer.shape_node.SetShape(scenic_rect);
         scenic_layer.shape_node.SetTranslation(
             layer->second.surface_size.width() * 0.5f,
             layer->second.surface_size.height() * 0.5f, -layer_elevation);
         scenic_layer.material.SetColor(SK_AlphaOPAQUE, SK_AlphaOPAQUE,
-                                       SK_AlphaOPAQUE, SK_AlphaOPAQUE - 1);
+                                       SK_AlphaOPAQUE, layer_opacity);
         scenic_layer.material.SetTexture(surface_image_id);
 
         // Only the first (i.e. the bottom-most) layer should receive input.
         // TODO: Workaround for invisible overlays stealing input. Remove when
         // the underlying bug is fixed.
-        if (first_layer) {
-          scenic_layer.shape_node.SetHitTestBehavior(
-              fuchsia::ui::gfx::HitTestBehavior::kDefault);
-        } else {
-          scenic_layer.shape_node.SetHitTestBehavior(
-              fuchsia::ui::gfx::HitTestBehavior::kSuppress);
-        }
-        first_layer = false;
+        const fuchsia::ui::gfx::HitTestBehavior layer_hit_test_behavior =
+            first_layer ? fuchsia::ui::gfx::HitTestBehavior::kDefault
+                        : fuchsia::ui::gfx::HitTestBehavior::kSuppress;
+        scenic_layer.shape_node.SetHitTestBehavior(layer_hit_test_behavior);
 
         // Attach the ScenicLayer to the main scene graph.
         layer_tree_node_.AddChild(scenic_layer.shape_node);
 
-        // Account for the ScenicLayer's height when positioning the next layer.
+        // Reset for the next pass:
+        //  +The next layer will not be the first layer.
+        //  +Account for the current layer's height when positioning the next.
+        first_layer = false;
         scenic_layer_index++;
       }
     }
@@ -439,7 +484,8 @@ void FuchsiaExternalViewEmbedder::EnableWireframe(bool enable) {
   session_.Present();
 }
 
-void FuchsiaExternalViewEmbedder::CreateView(int64_t view_id) {
+void FuchsiaExternalViewEmbedder::CreateView(int64_t view_id,
+                                             ViewIdCallback on_view_bound) {
   FML_DCHECK(scenic_views_.find(view_id) == scenic_views_.end());
 
   ScenicView new_view = {
@@ -450,6 +496,7 @@ void FuchsiaExternalViewEmbedder::CreateView(int64_t view_id) {
           scenic::ToViewHolderToken(zx::eventpair((zx_handle_t)view_id)),
           "Flutter::PlatformView"),
   };
+  on_view_bound(new_view.view_holder.id());
 
   new_view.opacity_node.SetLabel("flutter::PlatformView::OpacityMutator");
   new_view.entity_node.SetLabel("flutter::PlatformView::TransformMutator");
@@ -461,18 +508,26 @@ void FuchsiaExternalViewEmbedder::CreateView(int64_t view_id) {
   scenic_views_.emplace(std::make_pair(view_id, std::move(new_view)));
 }
 
-void FuchsiaExternalViewEmbedder::DestroyView(int64_t view_id) {
-  size_t erased = scenic_views_.erase(view_id);
-  FML_DCHECK(erased == 1);
+void FuchsiaExternalViewEmbedder::DestroyView(int64_t view_id,
+                                              ViewIdCallback on_view_unbound) {
+  auto scenic_view = scenic_views_.find(view_id);
+  FML_DCHECK(scenic_view != scenic_views_.end());
+  scenic::ResourceId resource_id = scenic_view->second.view_holder.id();
+
+  scenic_views_.erase(scenic_view);
+  on_view_unbound(resource_id);
 }
 
-void FuchsiaExternalViewEmbedder::SetViewProperties(int64_t view_id,
-                                                    bool hit_testable,
-                                                    bool focusable) {
+void FuchsiaExternalViewEmbedder::SetViewProperties(
+    int64_t view_id,
+    const SkRect& occlusion_hint,
+    bool hit_testable,
+    bool focusable) {
   auto found = scenic_views_.find(view_id);
   FML_DCHECK(found != scenic_views_.end());
   auto& view_holder = found->second;
 
+  view_holder.pending_occlusion_hint = occlusion_hint;
   view_holder.pending_hit_testable = hit_testable;
   view_holder.pending_focusable = focusable;
 }
@@ -486,7 +541,7 @@ void FuchsiaExternalViewEmbedder::Reset() {
   // Detach the root node to prepare for the next frame.
   layer_tree_node_.DetachChildren();
 
-  // Clear images on all layers so they aren't cached unnecesarily.
+  // Clear images on all layers so they aren't cached unnecessarily.
   for (auto& layer : scenic_layers_) {
     layer.material.SetTexture(0);
   }

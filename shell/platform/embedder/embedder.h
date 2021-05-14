@@ -210,6 +210,10 @@ typedef enum {
   kFlutterSemanticsFlagIsFocusable = 1 << 21,
   /// Whether the semantics node represents a link.
   kFlutterSemanticsFlagIsLink = 1 << 22,
+  /// Whether the semantics node represents a slider.
+  kFlutterSemanticsFlagIsSlider = 1 << 23,
+  /// Whether the semantics node represents a keyboard key.
+  kFlutterSemanticsFlagIsKeyboardKey = 1 << 24,
 } FlutterSemanticsFlag;
 
 typedef enum {
@@ -447,6 +451,43 @@ typedef const void* FlutterMetalCommandQueueHandle;
 /// Alias for id<MTLTexture>.
 typedef const void* FlutterMetalTextureHandle;
 
+/// Pixel format for the external texture.
+typedef enum {
+  kYUVA,
+  kRGBA,
+} FlutterMetalExternalTexturePixelFormat;
+
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterMetalExternalTexture).
+  size_t struct_size;
+  /// Height of the texture.
+  size_t width;
+  /// Height of the texture.
+  size_t height;
+  /// The pixel format type of the external.
+  FlutterMetalExternalTexturePixelFormat pixel_format;
+  /// Represents the size of the `textures` array.
+  size_t num_textures;
+  /// Supported textures are YUVA and RGBA, in case of YUVA we expect 2 texture
+  /// handles to be provided by the embedder, Y first and UV next. In case of
+  /// RGBA only one should be passed.
+  /// These are individually aliases for id<MTLTexture>. These textures are
+  /// retained by the engine for the period of the composition. Once these
+  /// textures have been unregistered via the
+  /// `FlutterEngineUnregisterExternalTexture`, the embedder has to release
+  /// these textures.
+  FlutterMetalTextureHandle* textures;
+} FlutterMetalExternalTexture;
+
+/// Callback to provide an external texture for a given texture_id.
+/// See: external_texture_frame_callback.
+typedef bool (*FlutterMetalTextureFrameCallback)(
+    void* /* user data */,
+    int64_t /* texture identifier */,
+    size_t /* width */,
+    size_t /* height */,
+    FlutterMetalExternalTexture* /* texture out */);
+
 typedef struct {
   /// The size of this struct. Must be sizeof(FlutterMetalTexture).
   size_t struct_size;
@@ -458,6 +499,13 @@ typedef struct {
   /// Handle to the MTLTexture that is owned by the embedder. Engine will render
   /// the frame into this texture.
   FlutterMetalTextureHandle texture;
+  /// A baton that is not interpreted by the engine in any way. It will be given
+  /// back to the embedder in the destruction callback below. Embedder resources
+  /// may be associated with this baton.
+  void* user_data;
+  /// The callback invoked by the engine when it no longer needs this backing
+  /// store.
+  VoidCallback destruction_callback;
 } FlutterMetalTexture;
 
 /// Callback for when a metal texture is requested.
@@ -485,6 +533,11 @@ typedef struct {
   /// The callback presented to the embedder to present a fully populated metal
   /// texture to the user.
   FlutterMetalPresentCallback present_drawable_callback;
+  /// When the embedder specifies that a texture has a frame available, the
+  /// engine will call this method (on an internal engine managed thread) so
+  /// that external texture details can be supplied to the engine for subsequent
+  /// composition.
+  FlutterMetalTextureFrameCallback external_texture_frame_callback;
 } FlutterMetalRendererConfig;
 
 typedef struct {
@@ -561,6 +614,7 @@ typedef enum {
 typedef enum {
   kFlutterPointerDeviceKindMouse = 1,
   kFlutterPointerDeviceKindTouch,
+  kFlutterPointerDeviceKindStylus,
 } FlutterPointerDeviceKind;
 
 /// Flags for the `buttons` field of `FlutterPointerEvent` when `device_kind`
@@ -901,6 +955,17 @@ typedef struct {
   VoidCallback destruction_callback;
 } FlutterSoftwareBackingStore;
 
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterMetalBackingStore).
+  size_t struct_size;
+  union {
+    // A Metal texture for Flutter to render into. Ownership is not transferred
+    // to Flutter; the texture is CFRetained on successfully being passed in and
+    // CFReleased when no longer used.
+    FlutterMetalTexture texture;
+  };
+} FlutterMetalBackingStore;
+
 typedef enum {
   /// Indicates that the Flutter application requested that an opacity be
   /// applied to the platform view.
@@ -958,6 +1023,8 @@ typedef enum {
   kFlutterBackingStoreTypeOpenGL,
   /// Specified an software allocation for Flutter to render into using the CPU.
   kFlutterBackingStoreTypeSoftware,
+  /// Specifies a Metal backing store. This is backed by a Metal texture.
+  kFlutterBackingStoreTypeMetal,
 } FlutterBackingStoreType;
 
 typedef struct {
@@ -977,6 +1044,8 @@ typedef struct {
     FlutterOpenGLBackingStore open_gl;
     /// The description of the software backing store.
     FlutterSoftwareBackingStore software;
+    // The description of the Metal backing store.
+    FlutterMetalBackingStore metal;
   };
 } FlutterBackingStore;
 
@@ -1079,6 +1148,14 @@ typedef struct {
   const char* variant_code;
 } FlutterLocale;
 
+/// Callback that returns the system locale.
+///
+/// Embedders that implement this callback should return the `FlutterLocale`
+/// from the `supported_locales` list that most closely matches the
+/// user/device's preferred locale.
+///
+/// This callback does not currently provide the user_data baton.
+/// https://github.com/flutter/flutter/issues/79826
 typedef const FlutterLocale* (*FlutterComputePlatformResolvedLocaleCallback)(
     const FlutterLocale** /* supported_locales*/,
     size_t /* Number of locales*/);
@@ -1101,7 +1178,7 @@ typedef struct {
   bool single_display;
 
   /// This represents the refresh period in frames per second. This value may be
-  /// zero if the device is not running or unavaliable or unknown.
+  /// zero if the device is not running or unavailable or unknown.
   double refresh_rate;
 } FlutterEngineDisplay;
 
@@ -1229,6 +1306,17 @@ typedef struct {
     const char* elf_path;
   };
 } FlutterEngineAOTDataSource;
+
+// Logging callback for Dart application messages.
+//
+// The `tag` parameter contains a null-terminated string containing a logging
+// tag or component name that can be used to identify system log messages from
+// the app. The `message` parameter contains a null-terminated string
+// containing the message to be logged. `user_data` is a user data baton passed
+// in `FlutterEngineRun`.
+typedef void (*FlutterLogMessageCallback)(const char* /* tag */,
+                                          const char* /* message */,
+                                          void* /* user_data */);
 
 /// An opaque object that describes the AOT data that can be used to launch a
 /// FlutterEngine instance in AOT mode.
@@ -1453,6 +1541,20 @@ typedef struct {
   /// `FlutterProjectArgs`.
   const char* const* dart_entrypoint_argv;
 
+  // Logging callback for Dart application messages.
+  //
+  // This callback is used by embedder to log print messages from the running
+  // Flutter application. This callback is made on an internal engine managed
+  // thread and embedders must re-thread if necessary. Performing blocking calls
+  // in this callback may introduce application jank.
+  FlutterLogMessageCallback log_message_callback;
+
+  // A tag string associated with application log messages.
+  //
+  // A log message tag string that can be used convey application, subsystem,
+  // or component name to embedder's logger. This string will be passed to to
+  // callbacks on `log_message_callback`. Defaults to "flutter" if unspecified.
+  const char* log_tag;
 } FlutterProjectArgs;
 
 #ifndef FLUTTER_ENGINE_NO_PROTOTYPES

@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.12
 part of engine;
 
 @immutable
@@ -37,6 +36,8 @@ class CkParagraphStyle implements ui.ParagraphStyle {
         _textDirection = textDirection ?? ui.TextDirection.ltr,
         _fontFamily = fontFamily,
         _fontSize = fontSize,
+        _height = height,
+        _leadingDistribution = textHeightBehavior?.leadingDistribution,
         _fontWeight = fontWeight,
         _fontStyle = fontStyle;
 
@@ -44,12 +45,15 @@ class CkParagraphStyle implements ui.ParagraphStyle {
   final ui.TextDirection? _textDirection;
   final String? _fontFamily;
   final double? _fontSize;
+  final double? _height;
   final ui.FontWeight? _fontWeight;
   final ui.FontStyle? _fontStyle;
+  final ui.TextLeadingDistribution? _leadingDistribution;
 
   static SkTextStyleProperties toSkTextStyleProperties(
     String? fontFamily,
     double? fontSize,
+    double? height,
     ui.FontWeight? fontWeight,
     ui.FontStyle? fontStyle,
   ) {
@@ -62,12 +66,16 @@ class CkParagraphStyle implements ui.ParagraphStyle {
       skTextStyle.fontSize = fontSize;
     }
 
+    if (height != null) {
+      skTextStyle.heightMultiplier = height;
+    }
+
     skTextStyle.fontFamilies = _getEffectiveFontFamilies(fontFamily);
 
     return skTextStyle;
   }
 
-  static SkStrutStyleProperties toSkStrutStyleProperties(ui.StrutStyle value) {
+  static SkStrutStyleProperties toSkStrutStyleProperties(ui.StrutStyle value, ui.TextHeightBehavior? paragraphHeightBehavior) {
     EngineStrutStyle style = value as EngineStrutStyle;
     final SkStrutStyleProperties skStrutStyle = SkStrutStyleProperties();
     skStrutStyle.fontFamilies =
@@ -79,6 +87,18 @@ class CkParagraphStyle implements ui.ParagraphStyle {
 
     if (style._height != null) {
       skStrutStyle.heightMultiplier = style._height;
+    }
+
+    final ui.TextLeadingDistribution? effectiveLeadingDistribution = style._leadingDistribution ?? paragraphHeightBehavior?.leadingDistribution;
+    switch (effectiveLeadingDistribution) {
+      case null:
+        break;
+      case ui.TextLeadingDistribution.even:
+        skStrutStyle.halfLeading = true;
+        break;
+      case ui.TextLeadingDistribution.proportional:
+        skStrutStyle.halfLeading = false;
+        break;
     }
 
     if (style._leading != null) {
@@ -132,7 +152,8 @@ class CkParagraphStyle implements ui.ParagraphStyle {
     }
 
     if (textHeightBehavior != null) {
-      properties.textHeightBehavior = textHeightBehavior.encode();
+      properties.textHeightBehavior =
+          toSkTextHeightBehavior(textHeightBehavior);
     }
 
     if (ellipsis != null) {
@@ -140,11 +161,11 @@ class CkParagraphStyle implements ui.ParagraphStyle {
     }
 
     if (strutStyle != null) {
-      properties.strutStyle = toSkStrutStyleProperties(strutStyle);
+      properties.strutStyle = toSkStrutStyleProperties(strutStyle, textHeightBehavior);
     }
 
-    properties.textStyle =
-        toSkTextStyleProperties(fontFamily, fontSize, fontWeight, fontStyle);
+    properties.textStyle = toSkTextStyleProperties(
+        fontFamily, fontSize, height, fontWeight, fontStyle);
 
     return canvasKit.ParagraphStyle(properties);
   }
@@ -153,6 +174,8 @@ class CkParagraphStyle implements ui.ParagraphStyle {
     return CkTextStyle(
       fontFamily: _fontFamily,
       fontSize: _fontSize,
+      height: _height,
+      leadingDistribution: _leadingDistribution,
       fontWeight: _fontWeight,
       fontStyle: _fontStyle,
     );
@@ -176,6 +199,7 @@ class CkTextStyle implements ui.TextStyle {
     double? letterSpacing,
     double? wordSpacing,
     double? height,
+    ui.TextLeadingDistribution? leadingDistribution,
     ui.Locale? locale,
     CkPaint? background,
     CkPaint? foreground,
@@ -197,6 +221,7 @@ class CkTextStyle implements ui.TextStyle {
       letterSpacing,
       wordSpacing,
       height,
+      leadingDistribution,
       locale,
       background,
       foreground,
@@ -220,6 +245,7 @@ class CkTextStyle implements ui.TextStyle {
     this.letterSpacing,
     this.wordSpacing,
     this.height,
+    this.leadingDistribution,
     this.locale,
     this.background,
     this.foreground,
@@ -241,6 +267,7 @@ class CkTextStyle implements ui.TextStyle {
   final double? letterSpacing;
   final double? wordSpacing;
   final double? height;
+  final ui.TextLeadingDistribution? leadingDistribution;
   final ui.Locale? locale;
   final CkPaint? background;
   final CkPaint? foreground;
@@ -267,6 +294,7 @@ class CkTextStyle implements ui.TextStyle {
       letterSpacing: other.letterSpacing ?? letterSpacing,
       wordSpacing: other.wordSpacing ?? wordSpacing,
       height: other.height ?? height,
+      leadingDistribution: other.leadingDistribution ?? leadingDistribution,
       locale: other.locale ?? locale,
       background: other.background ?? background,
       foreground: other.foreground ?? foreground,
@@ -359,6 +387,17 @@ class CkTextStyle implements ui.TextStyle {
       properties.heightMultiplier = height;
     }
 
+    switch (leadingDistribution) {
+      case null:
+        break;
+      case ui.TextLeadingDistribution.even:
+        properties.halfLeading = true;
+        break;
+      case ui.TextLeadingDistribution.proportional:
+        properties.halfLeading = false;
+        break;
+    }
+
     if (locale != null) {
       properties.locale = locale.toLanguageTag();
     }
@@ -433,7 +472,7 @@ class CkParagraph extends ManagedSkiaObject<SkParagraph>
   /// is deleted.
   final List<_ParagraphCommand> _paragraphCommands;
 
-  /// The constraints from the last time we layed the paragraph out.
+  /// The constraints from the last time we laid the paragraph out.
   ///
   /// This is used to resurrect the paragraph if the initial paragraph
   /// is deleted.
@@ -572,7 +611,7 @@ class CkParagraph extends ManagedSkiaObject<SkParagraph>
     try {
       skiaObject.layout(constraints.width);
     } catch (e) {
-      html.window.console.warn('CanvasKit threw an exception while laying '
+      printWarning('CanvasKit threw an exception while laying '
           'out the paragraph. The font was "${_paragraphStyle._fontFamily}". '
           'Exception:\n$e');
       rethrow;
@@ -581,15 +620,60 @@ class CkParagraph extends ManagedSkiaObject<SkParagraph>
 
   @override
   ui.TextRange getLineBoundary(ui.TextPosition position) {
-    // TODO(hterkelsen): Implement this when it's added to CanvasKit
-    throw UnimplementedError('getLineBoundary');
+    final List<SkLineMetrics> metrics = skiaObject.getLineMetrics();
+    final int offset = position.offset;
+    for (final SkLineMetrics metric in metrics) {
+      if (offset >= metric.startIndex && offset <= metric.endIndex) {
+        return ui.TextRange(start: metric.startIndex, end: metric.endIndex);
+      }
+    }
+    return ui.TextRange(start: -1, end: -1);
   }
 
   @override
   List<ui.LineMetrics> computeLineMetrics() {
-    // TODO(hterkelsen): Implement this when it's added to CanvasKit
-    throw UnimplementedError('computeLineMetrics');
+    final List<SkLineMetrics> skLineMetrics = skiaObject.getLineMetrics();
+    final List<ui.LineMetrics> result = <ui.LineMetrics>[];
+    for (final SkLineMetrics metric in skLineMetrics) {
+      result.add(CkLineMetrics._(metric));
+    }
+    return result;
   }
+}
+
+class CkLineMetrics implements ui.LineMetrics {
+  CkLineMetrics._(this.skLineMetrics);
+
+  final SkLineMetrics skLineMetrics;
+
+  @override
+  double get ascent => skLineMetrics.ascent;
+
+  @override
+  double get descent => skLineMetrics.descent;
+
+  // TODO(hterkelsen): Implement this correctly once SkParagraph does.
+  @override
+  double get unscaledAscent => skLineMetrics.ascent;
+
+  @override
+  bool get hardBreak => skLineMetrics.isHardBreak;
+
+  @override
+  double get baseline => skLineMetrics.baseline;
+
+  @override
+  double get height =>
+      (skLineMetrics.ascent + skLineMetrics.descent).round().toDouble();
+
+  @override
+  double get left => skLineMetrics.left;
+
+  @override
+  double get width => skLineMetrics.width;
+
+  @override
+  int get lineNumber => skLineMetrics.lineNumber;
 }
 
 class CkParagraphBuilder implements ui.ParagraphBuilder {
@@ -675,6 +759,26 @@ class CkParagraphBuilder implements ui.ParagraphBuilder {
     // TODO(hterkelsen): Make this faster for the common case where the text
     // is supported by the given fonts.
 
+    // A list of unique code units in the text.
+    final List<int> codeUnits = text.runes.toSet().toList();
+
+    // First, check if every code unit in the text is known to be covered by one
+    // of our global fallback fonts. We cache the set of code units covered by
+    // the global fallback fonts since this set is growing monotonically over
+    // the lifetime of the app.
+    if (_checkIfGlobalFallbacksSupport(codeUnits)) {
+      return;
+    }
+
+    // Next, check if all of the remaining code units are ones which are known
+    // to have no global font fallback. This means we know of no font we can
+    // download which will cover the remaining code units. In this case we can
+    // just skip the checks below, since we know there's nothing we can do to
+    // cover the code units.
+    if (_checkIfNoFallbackFontSupports(codeUnits)) {
+      return;
+    }
+
     // If the text is ASCII, then skip this check.
     bool isAscii = true;
     for (int i = 0; i < text.length; i++) {
@@ -686,8 +790,15 @@ class CkParagraphBuilder implements ui.ParagraphBuilder {
     if (isAscii) {
       return;
     }
+
     CkTextStyle style = _peekStyle();
-    List<String> fontFamilies = style.effectiveFontFamilies;
+    List<String> fontFamilies = <String>[];
+    if (style.fontFamily != null) {
+      fontFamilies.add(style.fontFamily!);
+    }
+    if (style.fontFamilyFallback != null) {
+      fontFamilies.addAll(style.fontFamilyFallback!);
+    }
     List<SkTypeface> typefaces = <SkTypeface>[];
     for (var font in fontFamilies) {
       List<SkTypeface>? typefacesForFamily =
@@ -696,11 +807,11 @@ class CkParagraphBuilder implements ui.ParagraphBuilder {
         typefaces.addAll(typefacesForFamily);
       }
     }
-    List<int> codeUnits = text.runes.toList();
     List<bool> codeUnitsSupported = List<bool>.filled(codeUnits.length, false);
+    String testString = String.fromCharCodes(codeUnits);
     for (SkTypeface typeface in typefaces) {
       SkFont font = SkFont(typeface);
-      Uint8List glyphs = font.getGlyphIDs(text);
+      Uint8List glyphs = font.getGlyphIDs(testString);
       assert(glyphs.length == codeUnitsSupported.length);
       for (int i = 0; i < glyphs.length; i++) {
         codeUnitsSupported[i] |= glyphs[i] != 0 || _isControlCode(codeUnits[i]);
@@ -714,13 +825,96 @@ class CkParagraphBuilder implements ui.ParagraphBuilder {
           missingCodeUnits.add(codeUnits[i]);
         }
       }
-      _findFontsForMissingCodeunits(missingCodeUnits);
+      findFontsForMissingCodeunits(missingCodeUnits);
     }
   }
 
   /// Returns [true] if [codepoint] is a Unicode control code.
   bool _isControlCode(int codepoint) {
     return codepoint < 32 || (codepoint > 127 && codepoint < 160);
+  }
+
+  /// Returns `true` if every code unit in [codeUnits] is covered by a global
+  /// fallback font.
+  ///
+  /// Calling this method has 2 side effects:
+  ///   1. Updating the cache of known covered code units in the
+  ///      [FontFallbackData] instance.
+  ///   2. Removing known covered code units from [codeUnits]. When the list
+  ///      is used again in [_ensureFontsSupportText]
+  bool _checkIfGlobalFallbacksSupport(List<int> codeUnits) {
+    final FontFallbackData fallbackData = FontFallbackData.instance;
+    codeUnits.removeWhere((int codeUnit) =>
+        fallbackData.knownCoveredCodeUnits.contains(codeUnit));
+    if (codeUnits.isEmpty) {
+      return true;
+    }
+
+    // We don't know if the remaining code units are covered by our fallback
+    // fonts. Check them and update the cache.
+    List<bool> codeUnitsSupported = List<bool>.filled(codeUnits.length, false);
+    String testString = String.fromCharCodes(codeUnits);
+
+    for (String font in fallbackData.globalFontFallbacks) {
+      List<SkTypeface>? typefacesForFamily =
+          skiaFontCollection.familyToTypefaceMap[font];
+      if (typefacesForFamily == null) {
+        printWarning('A fallback font was registered but we '
+            'cannot retrieve the typeface for it.');
+        continue;
+      }
+      for (SkTypeface typeface in typefacesForFamily) {
+        SkFont font = SkFont(typeface);
+        Uint8List glyphs = font.getGlyphIDs(testString);
+        assert(glyphs.length == codeUnitsSupported.length);
+        for (int i = 0; i < glyphs.length; i++) {
+          bool codeUnitSupported = glyphs[i] != 0;
+          if (codeUnitSupported) {
+            fallbackData.knownCoveredCodeUnits.add(codeUnits[i]);
+          }
+          codeUnitsSupported[i] |=
+              codeUnitSupported || _isControlCode(codeUnits[i]);
+        }
+      }
+
+      // Once we've checked every typeface for this family, check to see if
+      // every code unit has been covered in order to avoid unnecessary checks.
+      bool keepGoing = false;
+      for (bool supported in codeUnitsSupported) {
+        if (!supported) {
+          keepGoing = true;
+          break;
+        }
+      }
+
+      if (!keepGoing) {
+        // Every code unit is supported, clear [codeUnits] and return `true`.
+        codeUnits.clear();
+        return true;
+      }
+    }
+
+    // If we reached here, then there are some code units which aren't covered
+    // by the global fallback fonts. Remove the ones which were covered and
+    // return false.
+    for (int i = codeUnits.length - 1; i >= 0; i--) {
+      if (codeUnitsSupported[i]) {
+        codeUnits.removeAt(i);
+      }
+    }
+    return false;
+  }
+
+  /// Returns `true` if every code unit in [codeUnits] is known to not have any
+  /// fallback font which can cover it.
+  ///
+  /// This method has a side effect of removing every code unit from [codeUnits]
+  /// which is known not to have a fallback font which covers it.
+  bool _checkIfNoFallbackFontSupports(List<int> codeUnits) {
+    final FontFallbackData fallbackData = FontFallbackData.instance;
+    codeUnits.removeWhere((int codeUnit) =>
+        fallbackData.codeUnitsWithNoKnownFont.contains(codeUnit));
+    return codeUnits.isEmpty;
   }
 
   @override
@@ -754,7 +948,7 @@ class CkParagraphBuilder implements ui.ParagraphBuilder {
     if (_styleStack.length <= 1) {
       // The top-level text style is paragraph-level. We don't pop it off.
       if (assertionsEnabled) {
-        html.window.console.warn(
+        printWarning(
           'Cannot pop text style in ParagraphBuilder. '
           'Already popped all text styles from the style stack.',
         );
@@ -869,6 +1063,6 @@ List<String> _getEffectiveFontFamilies(String? fontFamily,
       !fontFamilyFallback.every((font) => fontFamily == font)) {
     fontFamilies.addAll(fontFamilyFallback);
   }
-  fontFamilies.addAll(skiaFontCollection.globalFontFallbacks);
+  fontFamilies.addAll(FontFallbackData.instance.globalFontFallbacks);
   return fontFamilies;
 }

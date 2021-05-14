@@ -53,6 +53,8 @@ template("runner_sources") {
       "accessibility_bridge.h",
       "component.cc",
       "component.h",
+      "default_session_connection.cc",
+      "default_session_connection.h",
       "engine.cc",
       "engine.h",
       "flutter_runner_product_configuration.cc",
@@ -72,8 +74,6 @@ template("runner_sources") {
       "platform_view.h",
       "runner.cc",
       "runner.h",
-      "session_connection.cc",
-      "session_connection.h",
       "surface.cc",
       "surface.h",
       "task_observers.cc",
@@ -111,7 +111,7 @@ template("runner_sources") {
       "//flutter/lib/ui",
       "//flutter/runtime",
       "//flutter/shell/common",
-      "//flutter/shell/platform/common/cpp/client_wrapper:client_wrapper",
+      "//flutter/shell/platform/common/client_wrapper:client_wrapper",
     ]
     flutter_deps = [
       ":fuchsia_gpu_configuration",
@@ -124,6 +124,7 @@ template("runner_sources") {
     public_deps = [
                     "$fuchsia_sdk_root/pkg:scenic_cpp",
                     "$fuchsia_sdk_root/pkg:sys_cpp",
+                    "$fuchsia_sdk_root/pkg:sys_inspect_cpp",
                     "//flutter/shell/platform/fuchsia/runtime/dart/utils",
                   ] + flutter_public_deps
 
@@ -511,7 +512,7 @@ executable("flutter_runner_scenic_unittests") {
 
   output_name = "flutter_runner_scenic_tests"
 
-  sources = [ "tests/session_connection_unittests.cc" ]
+  sources = [ "tests/default_session_connection_unittests.cc" ]
 
   # This is needed for //third_party/googletest for linking zircon symbols.
   libs = [ "//fuchsia/sdk/$host_os/arch/$target_cpu/sysroot/lib/libzircon.so" ]
@@ -833,6 +834,10 @@ fuchsia_test_archive("embedder_tests") {
     {
       path = "$root_gen_dir/flutter/shell/platform/embedder/assets/scene_without_custom_compositor_with_xform.png"
       dest = "assets/scene_without_custom_compositor_with_xform.png"
+    },
+    {
+      path = "$root_gen_dir/flutter/shell/platform/embedder/assets/snapshot_large_scene.png"
+      dest = "assets/snapshot_large_scene.png"
     },
     {
       path = "$root_gen_dir/flutter/shell/platform/embedder/assets/verifyb143464703.png"
